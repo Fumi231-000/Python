@@ -12,17 +12,15 @@ from dotenv import load_dotenv
 # 設定
 # ==========================================
 
-# False = テストモード（注文しない）
-# True  = 実際にTP/SL注文を出す
-AUTO_ORDER = False
+# 実際に注文を出す
+AUTO_ORDER = True
 
-# TP / SL
+# LONG
 TP_PERCENT = 1.5
 SL_PERCENT = 1.0
 
-# 監視間隔（秒）
+# 監視間隔
 CHECK_INTERVAL = 2
-
 
 # ==========================================
 # .env
@@ -38,10 +36,6 @@ if not API_KEY or not API_SECRET:
     print("APIキーまたはシークレットキーを取得できません")
     exit()
 
-
-# ==========================================
-# bitbank API
-# ==========================================
 
 BASE_URL = "https://api.bitbank.cc"
 
@@ -122,7 +116,7 @@ def private_post(endpoint, body):
 
 
 # ==========================================
-# 全信用建玉を取得
+# 全建玉取得
 # ==========================================
 
 def get_positions():
@@ -140,23 +134,15 @@ def get_positions():
 
     positions = data["data"]["positions"]
 
-    active_positions = []
-
-    for position in positions:
-
-        amount = float(
-            position["open_amount"]
-        )
-
-        if amount > 0:
-
-            active_positions.append(position)
-
-    return active_positions
+    return [
+        p
+        for p in positions
+        if float(p["open_amount"]) > 0
+    ]
 
 
 # ==========================================
-# TP / SL注文を取得
+# TP / SL注文取得
 # ==========================================
 
 def get_tpsl_orders(pair):
@@ -169,7 +155,6 @@ def get_tpsl_orders(pair):
     )
 
     if data.get("success") != 1:
-
         return []
 
     orders = data["data"]["orders"]
@@ -177,10 +162,10 @@ def get_tpsl_orders(pair):
     return [
         order
         for order in orders
-        if order["type"] in [
+        if order["type"] in (
             "take_profit",
             "stop_loss"
-        ]
+        )
     ]
 
 
@@ -198,21 +183,21 @@ def calculate_prices(position):
 
     if side == "long":
 
-        tp_price = average_price * (
+        tp = average_price * (
             1 + TP_PERCENT / 100
         )
 
-        sl_price = average_price * (
+        sl = average_price * (
             1 - SL_PERCENT / 100
         )
 
     elif side == "short":
 
-        tp_price = average_price * (
+        tp = average_price * (
             1 - TP_PERCENT / 100
         )
 
-        sl_price = average_price * (
+        sl = average_price * (
             1 + SL_PERCENT / 100
         )
 
@@ -220,22 +205,22 @@ def calculate_prices(position):
 
         return None, None
 
-    return tp_price, sl_price
+    return tp, sl
 
 
 # ==========================================
-# TP / SL存在確認
+# 現在のTP / SLを取得
 # ==========================================
 
-def check_tpsl(position):
+def get_position_tpsl(position):
 
     pair = position["pair"]
     side = position["position_side"]
 
     orders = get_tpsl_orders(pair)
 
-    tp_exists = False
-    sl_exists = False
+    tp_orders = []
+    sl_orders = []
 
     for order in orders:
 
@@ -243,26 +228,105 @@ def check_tpsl(position):
             continue
 
         if order["type"] == "take_profit":
-            tp_exists = True
+            tp_orders.append(order)
 
         elif order["type"] == "stop_loss":
-            sl_exists = True
+            sl_orders.append(order)
 
-    return tp_exists, sl_exists
+    return tp_orders, sl_orders
 
 
 # ==========================================
-# 建玉情報表示
+# TP / SLキャンセル
+# ==========================================
+
+def cancel_order(pair, order_id):
+
+    body = {
+        "pair": pair,
+        "order_id": int(order_id)
+    }
+
+    return private_post(
+        "/v1/user/spot/cancel_order",
+        body
+    )
+
+
+# ==========================================
+# TP注文
+# ==========================================
+
+def place_tp(position, tp_price):
+
+    pair = position["pair"]
+    side = position["position_side"]
+
+    close_side = (
+        "sell"
+        if side == "long"
+        else "buy"
+    )
+
+    body = {
+        "pair": pair,
+        "side": close_side,
+        "position_side": side,
+        "type": "take_profit",
+        "trigger_price": str(tp_price)
+    }
+
+    return private_post(
+        "/v1/user/spot/order",
+        body
+    )
+
+
+# ==========================================
+# SL注文
+# ==========================================
+
+def place_sl(position, sl_price):
+
+    pair = position["pair"]
+    side = position["position_side"]
+
+    close_side = (
+        "sell"
+        if side == "long"
+        else "buy"
+    )
+
+    body = {
+        "pair": pair,
+        "side": close_side,
+        "position_side": side,
+        "type": "stop_loss",
+        "trigger_price": str(sl_price)
+    }
+
+    return private_post(
+        "/v1/user/spot/order",
+        body
+    )
+
+
+# ==========================================
+# 建玉表示
 # ==========================================
 
 def show_position(position, title):
 
     pair = position["pair"]
     side = position["position_side"]
-    amount = position["open_amount"]
-    average_price = position["average_price"]
 
-    tp_price, sl_price = calculate_prices(
+    amount = position["open_amount"]
+
+    average = float(
+        position["average_price"]
+    )
+
+    tp, sl = calculate_prices(
         position
     )
 
@@ -274,127 +338,189 @@ def show_position(position, title):
     print(f"通貨ペア     : {pair}")
     print(f"ポジション   : {side}")
     print(f"建玉数量     : {amount}")
-    print(f"平均取得価格 : {average_price}")
+    print(f"平均取得価格 : {average:.0f}")
 
-    if tp_price is not None:
+    if tp is not None:
 
-        print(f"TP価格       : {tp_price:.0f}")
-        print(f"SL価格       : {sl_price:.0f}")
+        print(f"自動TP価格   : {tp:.3f}")
+        print(f"自動SL価格   : {sl:.3f}")
 
 
 # ==========================================
-# 建玉処理
+# 新規建玉
 # ==========================================
 
-def process_position(position):
-
-    pair = position["pair"]
+def handle_new_position(position):
 
     show_position(
         position,
-        "★★ 新規建玉を検出 ★★"
+        "★★ 新規建玉 ★★"
     )
 
-    tp_price, sl_price = calculate_prices(
+    tp, sl = calculate_prices(
         position
     )
 
-    tp_exists, sl_exists = check_tpsl(
+    tp_orders, sl_orders = get_position_tpsl(
         position
     )
 
     print()
     print(
-        f"TP注文 : {'あり' if tp_exists else 'なし'}"
+        f"既存TP : {len(tp_orders)}件"
     )
 
     print(
-        f"SL注文 : {'あり' if sl_exists else 'なし'}"
+        f"既存SL : {len(sl_orders)}件"
     )
-
-    # ======================================
-    # テストモード
-    # ======================================
 
     if not AUTO_ORDER:
 
         print()
         print("【テストモード】")
         print("実際の注文は出していません")
+        return
 
-        if not tp_exists:
-            print(
-                f"TP発注予定 : {tp_price:.0f}円"
-            )
+    # 新規建玉なのに既存注文がある場合は触らない
+    if tp_orders or sl_orders:
 
-        if not sl_exists:
-            print(
-                f"SL発注予定 : {sl_price:.0f}円"
-            )
+        print()
+        print("既存TP/SLがあるため変更しません")
+        return
+
+    print()
+    print("TP注文を発注します")
+
+    result = place_tp(
+        position,
+        tp
+    )
+
+    print(result)
+
+    print()
+    print("SL注文を発注します")
+
+    result = place_sl(
+        position,
+        sl
+    )
+
+    print(result)
+
+
+# ==========================================
+# 追加購入
+# ==========================================
+
+def handle_added_position(position):
+
+    show_position(
+        position,
+        "★★ 追加建玉を検出 ★★"
+    )
+
+    tp_orders, sl_orders = get_position_tpsl(
+        position
+    )
+
+    print()
+    print("平均取得価格が変化しました")
+
+    print(
+        f"現在のTP : {len(tp_orders)}件"
+    )
+
+    print(
+        f"現在のSL : {len(sl_orders)}件"
+    )
+
+    # ======================================
+    # テスト
+    # ======================================
+
+    if not AUTO_ORDER:
+
+        print()
+        print("【テストモード】")
+        print("既存TP/SLをキャンセルして")
+        print("新しい平均取得価格から再設定する予定です")
 
         return
 
     # ======================================
-    # 実際の注文
+    # 既存TPをキャンセル
     # ======================================
 
-    if not tp_exists:
+    for order in tp_orders:
 
-        side = position["position_side"]
-
-        close_side = (
-            "sell"
-            if side == "long"
-            else "buy"
-        )
-
-        body = {
-            "pair": pair,
-            "side": close_side,
-            "position_side": side,
-            "type": "take_profit",
-            "trigger_price": str(
-                int(tp_price)
-            )
-        }
-
-        result = private_post(
-            "/v1/user/spot/order",
-            body
-        )
+        order_id = order["order_id"]
 
         print()
-        print("TP注文結果")
+        print(
+            f"既存TPをキャンセル : {order_id}"
+        )
+
+        result = cancel_order(
+            position["pair"],
+            order_id
+        )
+
         print(result)
 
-    if not sl_exists:
+    # ======================================
+    # 既存SLをキャンセル
+    # ======================================
 
-        side = position["position_side"]
+    for order in sl_orders:
 
-        close_side = (
-            "sell"
-            if side == "long"
-            else "buy"
-        )
-
-        body = {
-            "pair": pair,
-            "side": close_side,
-            "position_side": side,
-            "type": "stop_loss",
-            "trigger_price": str(
-                int(sl_price)
-            )
-        }
-
-        result = private_post(
-            "/v1/user/spot/order",
-            body
-        )
+        order_id = order["order_id"]
 
         print()
-        print("SL注文結果")
+        print(
+            f"既存SLをキャンセル : {order_id}"
+        )
+
+        result = cancel_order(
+            position["pair"],
+            order_id
+        )
+
         print(result)
+
+    # ======================================
+    # 新しい平均価格から計算
+    # ======================================
+
+    tp, sl = calculate_prices(
+        position
+    )
+
+    print()
+    print("新しいTP/SLを発注します")
+
+    print(f"新TP : {tp:.3f}")
+    print(f"新SL : {sl:.3f}")
+
+    # TP
+    result = place_tp(
+        position,
+        tp
+    )
+
+    print()
+    print("新TP注文結果")
+    print(result)
+
+    # SL
+    result = place_sl(
+        position,
+        sl
+    )
+
+    print()
+    print("新SL注文結果")
+    print(result)
 
 
 # ==========================================
@@ -406,13 +532,13 @@ print("================================")
 print("       Auto TP / SL")
 print("================================")
 
-print(f"TP       : {TP_PERCENT}%")
-print(f"SL       : {SL_PERCENT}%")
+print(f"TP       : +{TP_PERCENT}%")
+print(f"SL       : -{SL_PERCENT}%")
 print(f"自動発注 : {AUTO_ORDER}")
 
 
 # ==========================================
-# 起動時の既存建玉
+# 起動時の建玉を記録
 # ==========================================
 
 initial_positions = get_positions()
@@ -426,26 +552,24 @@ for position in initial_positions:
         position["position_side"]
     )
 
-    amount = float(
-        position["open_amount"]
-    )
+    previous_positions[key] = {
+        "amount": float(
+            position["open_amount"]
+        ),
+        "average": float(
+            position["average_price"]
+        )
+    }
 
-    previous_positions[key] = amount
-
-    # 既存建玉だけ表示
     show_position(
         position,
         "既存建玉"
     )
 
 
-# ==========================================
-# 監視開始
-# ==========================================
-
 print()
 print("監視中...")
-print("新しい建玉ができた場合のみ表示します")
+print("新しい建玉・追加購入のみ表示します")
 print("Ctrl + C で終了")
 
 
@@ -457,39 +581,73 @@ while True:
 
     try:
 
-        current_positions = get_positions()
+        positions = get_positions()
 
-        current_map = {}
+        current_positions = {}
 
-        for position in current_positions:
+        for position in positions:
 
             key = (
                 position["pair"],
                 position["position_side"]
             )
 
-            current_amount = float(
+            amount = float(
                 position["open_amount"]
             )
 
-            current_map[key] = current_amount
+            average = float(
+                position["average_price"]
+            )
 
-            previous_amount = previous_positions.get(
-                key,
-                0
+            current_positions[key] = {
+                "amount": amount,
+                "average": average
+            }
+
+            previous = previous_positions.get(
+                key
             )
 
             # ==================================
-            # 新規建玉・建玉増加
+            # 完全な新規建玉
             # ==================================
 
-            if current_amount > previous_amount:
+            if previous is None:
 
-                process_position(
+                handle_new_position(
                     position
                 )
 
-        previous_positions = current_map
+            # ==================================
+            # 既存建玉の追加
+            # ==================================
+
+            else:
+
+                old_amount = previous["amount"]
+                old_average = previous["average"]
+
+                amount_increased = (
+                    amount > old_amount
+                )
+
+                average_changed = (
+                    abs(
+                        average - old_average
+                    ) > 0.00000001
+                )
+
+                if (
+                    amount_increased
+                    and average_changed
+                ):
+
+                    handle_added_position(
+                        position
+                    )
+
+        previous_positions = current_positions
 
         time.sleep(CHECK_INTERVAL)
 
